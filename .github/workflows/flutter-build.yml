@@ -9,6 +9,36 @@ on:
       upload-tag:
         type: string
         default: "nightly"
+  # Manual trigger: "Run workflow" button. Reuses the same input names as
+  # workflow_call so every existing `${{ inputs.* }}` reference works for both
+  # triggers. The private-deployment settings below can be overridden here, or
+  # set once as repo/org Secrets (preferred for RUSTDESK_STATIC_PASSWORD).
+  workflow_dispatch:
+    inputs:
+      upload-artifact:
+        type: boolean
+        description: "Upload build artifacts"
+        default: true
+      upload-tag:
+        type: string
+        description: "Release/tag name for uploaded artifacts"
+        default: "nightly"
+      server_host:
+        type: string
+        description: "Rendezvous server host (RUSTDESK_SERVER_HOST). Leave empty to use patch default."
+        default: ""
+      pub_key:
+        type: string
+        description: "Rendezvous public key (RUSTDESK_PUB_KEY). Leave empty to use patch default."
+        default: ""
+      api_url:
+        type: string
+        description: "Admin/API server URL (RUSTDESK_API_SERVER_URL). Leave empty if none."
+        default: ""
+      static_password:
+        type: string
+        description: "Build-time injected static password (RUSTDESK_STATIC_PASSWORD). Prefer a repo Secret in production."
+        default: ""
 
 # NOTE: F-Droid builder script 'flutter/build_fdroid.sh' reads environment
 # variables from this workflow!
@@ -45,6 +75,17 @@ env:
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
   UPLOAD_ARTIFACT: "${{ inputs.upload-artifact }}"
   SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}"
+  # --- Private deployment build-time settings ---
+  # Consumed by .github/patches/custom_build.patch via `option_env!` at compile
+  # time. Resolve from the workflow_dispatch form (when run manually) or from
+  # repo/org Secrets (when called by ci/nightly/tag). Empty => patch defaults
+  # (no server baked in; API/password empty). Ports are intentionally NOT set
+  # here: they keep their patch defaults 60016/60017/60018/60019, because
+  # exporting an empty port would parse to 0 and break the client.
+  RUSTDESK_SERVER_HOST: "${{ github.event.inputs.server_host || secrets.RUSTDESK_SERVER_HOST || '' }}"
+  RUSTDESK_PUB_KEY: "${{ github.event.inputs.pub_key || secrets.RUSTDESK_PUB_KEY || '' }}"
+  RUSTDESK_API_SERVER_URL: "${{ github.event.inputs.api_url || secrets.RUSTDESK_API_SERVER_URL || '' }}"
+  RUSTDESK_STATIC_PASSWORD: "${{ github.event.inputs.static_password || secrets.RUSTDESK_STATIC_PASSWORD || '' }}"
 
 jobs:
   generate-bridge:
@@ -90,6 +131,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
 
       - name: Restore bridge files
         uses: actions/download-artifact@master
@@ -312,6 +359,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
+
       - name: Install LLVM and Clang
         uses: rustdesk-org/install-llvm-action-32bit@master
         with:
@@ -442,6 +495,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
+
       - name: Restore bridge files
         uses: actions/download-artifact@master
         with:
@@ -528,6 +587,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
 
       - name: Install flutter
         uses: subosito/flutter-action@v2
@@ -637,6 +702,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
+
       # $VCPKG_ROOT/vcpkg install --triplet arm64-ios --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Restore bridge files
@@ -710,6 +781,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
 
       - name: Import the codesign cert
         if: env.MACOS_P12_BASE64 != null
@@ -1006,6 +1083,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
+
       - name: Install flutter
         uses: subosito/flutter-action@v2
         with:
@@ -1276,6 +1359,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
+
       - name: Install flutter
         uses: subosito/flutter-action@v2
         with:
@@ -1438,6 +1527,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
 
       - name: Set Swap Space
         if: ${{ matrix.job.arch == 'x86_64' }}
@@ -1768,6 +1863,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
+
       - name: Free Space
         run: |
           df -h
@@ -1960,6 +2061,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
+
       - name: Download Binary
         uses: actions/download-artifact@master
         with:
@@ -2035,6 +2142,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
+
       - name: Download Binary
         uses: actions/download-artifact@master
         with:
@@ -2093,6 +2206,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Apply custom libs patch
+        # Our build-time customizations (static password, rendezvous host/ports,
+        # api server, deb deps) live in .github/patches/custom_build.patch, which
+        # is root-relative so it applies with rustdesk's standard `git apply -p1`.
+        run: git apply .github/patches/custom_build.patch
 
       - name: Prepare env
         run: |

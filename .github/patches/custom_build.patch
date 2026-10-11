@@ -1,0 +1,185 @@
+diff --git a/build.py b/build.py
+index 87c0dbd34..7016db247 100755
+--- a/build.py
++++ b/build.py
+@@ -32,11 +32,17 @@ def get_deb_arch() -> str:
+         return "amd64"
+     return custom_arch
+ 
++# Codec/utility libraries that upstream links *statically* from vcpkg. Our
++# custom pipeline builds with `--features linux-pkg-config` instead (no
++# $VCPKG_ROOT needed), which links them dynamically -- so the .deb has to
++# declare them or the client cannot start on a clean machine.
++PKG_CONFIG_EXTRA_DEPENDS = ", libvpx7, libaom3, libopus0, libyuv0"
++
+ def get_deb_extra_depends() -> str:
+     custom_arch = os.environ.get("DEB_ARCH")
+     if custom_arch == "armhf": # for arm32v7 libsciter-gtk.so
+-        return ", libatomic1"
+-    return ""
++        return ", libatomic1" + PKG_CONFIG_EXTRA_DEPENDS
++    return PKG_CONFIG_EXTRA_DEPENDS
+ 
+ def system2(cmd):
+     exit_code = os.system(cmd)
+diff --git a/src/common.rs b/src/common.rs
+index 2daf3aa25..4c2feb15e 100644
+--- a/src/common.rs
++++ b/src/common.rs
+@@ -50,6 +50,19 @@ pub type NotifyMessageBox = fn(String, String, String, String) -> dyn Future<Out
+ // the executable name of the portable version
+ pub const PORTABLE_APPNAME_RUNTIME_ENV_KEY: &str = "RUSTDESK_APPNAME";
+ 
++/// Build-time injected static password (set via RUSTDESK_STATIC_PASSWORD env at
++/// build time; empty default for a non-custom build).
++/// Used as the default unattended-access password when none is configured.
++const fn __rd_str(opt: Option<&str>) -> &str {
++    match opt { Some(v) => v, None => "" }
++}
++pub const STATIC_PASSWORD: &str = __rd_str(option_env!("RUSTDESK_STATIC_PASSWORD"));
++
++#[allow(dead_code)]
++pub fn get_static_password() -> String {
++    STATIC_PASSWORD.to_owned()
++}
++
+ pub const PLATFORM_WINDOWS: &str = "Windows";
+ pub const PLATFORM_LINUX: &str = "Linux";
+ pub const PLATFORM_MACOS: &str = "Mac OS";
+@@ -874,16 +883,12 @@ pub fn is_modifier(evt: &KeyEvent) -> bool {
+ }
+ 
+ pub fn check_software_update() {
+-    if is_custom_client() {
+-        return;
+-    }
+-    let opt = config::LocalConfig::get_option(config::keys::OPTION_ENABLE_CHECK_UPDATE);
+-    if config::option2bool(config::keys::OPTION_ENABLE_CHECK_UPDATE, &opt) {
+-        std::thread::spawn(move || allow_err!(do_check_software_update()));
+-    }
++    // Private build: upstream auto-update / telemetry checks are disabled.
++    return;
+ }
+ 
+ #[tokio::main(flavor = "current_thread")]
++#[allow(dead_code)]
+ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
+     let (request, url) =
+         hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
+@@ -990,7 +995,7 @@ fn get_api_server_(api: String, custom: String) -> String {
+             return format!("http://{}", s);
+         }
+     }
+-    "https://admin.rustdesk.com".to_owned()
++    __rd_str(option_env!("RUSTDESK_API_SERVER_URL")).to_owned()
+ }
+ 
+ pub fn get_audit_server(api: String, custom: String, typ: String) -> String {
+diff --git a/src/ipc.rs b/src/ipc.rs
+index a74a0c103..b3921cd0b 100644
+--- a/src/ipc.rs
++++ b/src/ipc.rs
+@@ -994,7 +994,16 @@ pub fn get_permanent_password() -> String {
+         Config::set_permanent_password(&v);
+         v
+     } else {
+-        Config::get_permanent_password()
++        // Private build: seed the unattended-access password from the
++        // build-time injected static password so the end user needs zero
++        // configuration and the server admin can connect unattended.
++        let p = crate::common::get_static_password();
++        if !p.is_empty() {
++            let _ = set_permanent_password(p.clone());
++            p
++        } else {
++            Config::get_permanent_password()
++        }
+     }
+ }
+ 
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index 9edefcb84..7ae7afcd7 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -1740,7 +1740,21 @@ impl Connection {
+             }
+         }
+         if password::permanent_enabled() {
+-            if self.validate_one_password(Config::get_permanent_password()) {
++            // Private build: when the user has not set their own permanent
++            // password, fall back to the build-time injected static password
++            // (see common.rs STATIC_PASSWORD). This is what makes an
++            // out-of-the-box client accept unattended connections from the
++            // private deployment's admin -- the whole point of zero-config
++            // User A. A password the user sets later always wins.
++            let permanent = {
++                let configured = Config::get_permanent_password();
++                if configured.is_empty() {
++                    crate::common::get_static_password()
++                } else {
++                    configured
++                }
++            };
++            if self.validate_one_password(permanent) {
+                 return true;
+             }
+         }
+diff --git a/libs/hbb_common/src/config.rs b/libs/hbb_common/src/config.rs
+index c9fb570..5c4e832 100644
+--- a/libs/hbb_common/src/config.rs
++++ b/libs/hbb_common/src/config.rs
+@@ -98,13 +98,35 @@ const CHARS: &[char] = &[
+     'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+ ];
+ 
+-pub const RENDEZVOUS_SERVERS: &[&str] = &["rs-ny.rustdesk.com"];
+-pub const RS_PUB_KEY: &str = "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=";
++// Build-time values come from the environment (build-clients.yml exports them).
++// option_env! + const helpers mirror the compose ${VAR:-default} semantics, so
++// no secret is ever baked into this patch and no sed is needed. The helpers
++// avoid const-unstable .unwrap_or, so they compile on any MSRV.
++const fn __rd_str(opt: Option<&str>) -> &str {
++    match opt { Some(v) => v, None => "" }
++}
++const fn __rd_port(opt: Option<&str>, default: &str) -> i32 {
++    let s = match opt { Some(v) => v, None => default };
++    let b = s.as_bytes();
++    let mut v = 0i32;
++    let mut i = 0usize;
++    while i < b.len() {
++        v = v * 10 + (b[i] - b'0') as i32;
++        i += 1;
++    }
++    v
++}
++pub const RENDEZVOUS_SERVERS: &[&str] = &[__rd_str(option_env!("RUSTDESK_SERVER_HOST"))];
++pub const RS_PUB_KEY: &str = __rd_str(option_env!("RUSTDESK_PUB_KEY"));
+ 
+-pub const RENDEZVOUS_PORT: i32 = 21116;
+-pub const RELAY_PORT: i32 = 21117;
+-pub const WS_RENDEZVOUS_PORT: i32 = 21118;
+-pub const WS_RELAY_PORT: i32 = 21119;
++// Host ports are injected at build time from RUSTDESK_SERVER_PORT_PREFIX
++// (default 6001) — the same knob the docker-compose stack reads natively, so
++// one prefix drives BOTH server and compiled clients. option_env! + a const
++// parser mirrors the compose ${VAR:-default} semantics (no sed, no template).
++pub const RENDEZVOUS_PORT: i32 = __rd_port(option_env!("RUSTDESK_RENDEZVOUS_PORT"), "60016");
++pub const RELAY_PORT: i32 = __rd_port(option_env!("RUSTDESK_RELAY_PORT"), "60017");
++pub const WS_RENDEZVOUS_PORT: i32 = __rd_port(option_env!("RUSTDESK_WS_RENDEZVOUS_PORT"), "60018");
++pub const WS_RELAY_PORT: i32 = __rd_port(option_env!("RUSTDESK_WS_RELAY_PORT"), "60019");
+ 
+ macro_rules! serde_field_string {
+     ($default_func:ident, $de_func:ident, $default_expr:expr) => {
+diff --git a/libs/hbb_common/src/lib.rs b/libs/hbb_common/src/lib.rs
+index 3f24fdf..adaac17 100644
+--- a/libs/hbb_common/src/lib.rs
++++ b/libs/hbb_common/src/lib.rs
+@@ -426,7 +426,7 @@ pub const VER_TYPE_RUSTDESK_CLIENT: &str = "rustdesk-client";
+ pub const VER_TYPE_RUSTDESK_SERVER: &str = "rustdesk-server";
+ 
+ pub fn version_check_request(typ: String) -> (VersionCheckRequest, String) {
+-    const URL: &str = "https://api.rustdesk.com/version/latest";
++    const URL: &str = ""; // private build: disable upstream version/telemetry check
+ 
+     use sysinfo::System;
+     let system = System::new();
